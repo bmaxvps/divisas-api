@@ -178,9 +178,22 @@ def crear_orden(data: OrdenIn, usuario: dict = Depends(auth.solo_admin)):
 
 @app.put("/ordenes/{orden_id}/completar")
 def completar_orden(orden_id: int, data: OrdenCompletar, usuario: dict = Depends(auth.get_usuario_actual)):
+    orden = db.get_orden_by_id(orden_id)
+    if not orden:
+        raise HTTPException(404, "Orden no encontrada")
     ok = db.completar_orden(orden_id, data.monto_real, usuario["nombre"], usuario["id"])
     if not ok:
-        raise HTTPException(404, "Orden no encontrada o ya ejecutada")
+        raise HTTPException(404, "Orden ya ejecutada")
+    # Actualizar saldo e registrar movimiento igual que el bot de Telegram
+    tipo_mov = "entrada" if orden["tipo"] == "recibir" else "salida"
+    delta    = data.monto_real if tipo_mov == "entrada" else -data.monto_real
+    db.actualizar_saldo(orden["punto"], orden["divisa"], delta)
+    descripcion = f"Orden #{orden_id} — {orden['cliente']}"
+    db.registrar_movimiento(
+        punto=orden["punto"], divisa=orden["divisa"], tipo=tipo_mov,
+        monto=data.monto_real, descripcion=descripcion,
+        usuario_id=usuario["id"], usuario_nom=usuario["nombre"]
+    )
     return {"ok": True}
 
 
