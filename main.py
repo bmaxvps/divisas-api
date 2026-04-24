@@ -21,6 +21,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup():
+    db.init_db()
     db.init_usuarios()
     # Crear admin por defecto si no existe
     if not db.get_usuario("admin"):

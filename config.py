@@ -3,7 +3,10 @@
 import os
 
 # ── Base de datos ─────────────────────────────────────
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "divisas_bot", "data", "divisas.db")
+DB_PATH = os.environ.get(
+    "DB_PATH",
+    os.path.join(os.path.dirname(__file__), "data", "divisas.db")
+)
 
 # ── JWT ───────────────────────────────────────────────
 SECRET_KEY = "divisas-api-secret-2024-cambiar-en-produccion"

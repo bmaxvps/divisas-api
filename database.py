@@ -21,6 +21,85 @@ def get_conn():
     return conn
 
 
+# ── INIT ──────────────────────────────────────────────────────────
+
+def init_db():
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS saldos (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            punto  TEXT NOT NULL,
+            divisa TEXT NOT NULL,
+            monto  REAL DEFAULT 0.0,
+            UNIQUE(punto, divisa)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS movimientos (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha        TEXT,
+            punto        TEXT,
+            divisa       TEXT,
+            tipo         TEXT,
+            monto        REAL,
+            descripcion  TEXT DEFAULT '',
+            usuario_id   INTEGER,
+            usuario_nom  TEXT,
+            editado      INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ordenes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_creacion  TEXT,
+            punto           TEXT,
+            tipo            TEXT,
+            cliente         TEXT,
+            divisa          TEXT,
+            monto_estimado  REAL,
+            monto_real      REAL,
+            codigo          TEXT DEFAULT '',
+            estado          TEXT DEFAULT 'pendiente',
+            fecha_completado TEXT,
+            completado_por  TEXT,
+            completado_id   INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tasas (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            par          TEXT,
+            tasa         REAL,
+            fecha        TEXT,
+            usuario_nom  TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gastos_personales (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha       TEXT,
+            tipo        TEXT,
+            categoria   TEXT,
+            monto       REAL,
+            descripcion TEXT DEFAULT '',
+            divisa      TEXT DEFAULT 'USD'
+        )
+    """)
+    conn.execute("CREATE TABLE IF NOT EXISTS alertas_config (id INTEGER PRIMARY KEY, data TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS config_bot (clave TEXT PRIMARY KEY, valor TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS historial_actividad (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, usuario TEXT, accion TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS activos_pasivos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, tipo TEXT, descripcion TEXT, monto REAL, divisa TEXT)")
+    # Inicializar saldos en 0 para todos los puntos y divisas
+    for punto in PUNTOS:
+        for divisa in DIVISAS:
+            conn.execute(
+                "INSERT OR IGNORE INTO saldos (punto, divisa, monto) VALUES (?,?,0.0)",
+                (punto, divisa)
+            )
+    conn.commit()
+    conn.close()
+
+
 # ── USUARIOS (tabla nueva para la app) ───────────────────────────
 
 def init_usuarios():
