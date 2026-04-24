@@ -1,8 +1,8 @@
-"""Base de datos SQLite — comparte el mismo archivo que el bot de Telegram."""
+"""Base de datos SQLite."""
 
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import DB_PATH, PUNTOS, DIVISAS
 import pytz
 
@@ -89,6 +89,33 @@ def init_db():
     conn.execute("CREATE TABLE IF NOT EXISTS config_bot (clave TEXT PRIMARY KEY, valor TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS historial_actividad (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, usuario TEXT, accion TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS activos_pasivos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, tipo TEXT, descripcion TEXT, monto REAL, divisa TEXT)")
+
+    # Alertas de saldo mínimo
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alertas_saldo (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            punto  TEXT NOT NULL,
+            divisa TEXT NOT NULL,
+            minimo REAL DEFAULT 0.0,
+            activo INTEGER DEFAULT 1,
+            UNIQUE(punto, divisa)
+        )
+    """)
+
+    # Chat por punto
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_mensajes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            punto       TEXT NOT NULL,
+            remitente   TEXT NOT NULL,
+            rol_remit   TEXT NOT NULL,
+            contenido   TEXT DEFAULT '',
+            imagen_b64  TEXT DEFAULT NULL,
+            fecha       TEXT NOT NULL,
+            estado      TEXT DEFAULT 'enviado'
+        )
+    """)
+
     # Inicializar saldos en 0 para todos los puntos y divisas
     for punto in PUNTOS:
         for divisa in DIVISAS:
@@ -100,7 +127,7 @@ def init_db():
     conn.close()
 
 
-# ── USUARIOS (tabla nueva para la app) ───────────────────────────
+# ── USUARIOS ──────────────────────────────────────────────────────
 
 def init_usuarios():
     conn = get_conn()
@@ -109,12 +136,18 @@ def init_usuarios():
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            rol      TEXT NOT NULL DEFAULT 'operador',  -- 'admin' o 'operador'
+            rol      TEXT NOT NULL DEFAULT 'operador',
             punto    TEXT,
             nombre   TEXT,
-            activo   INTEGER DEFAULT 1
+            activo   INTEGER DEFAULT 1,
+            es_superuser INTEGER DEFAULT 0
         )
     """)
+    # Agregar columna es_superuser si no existe (para DBs ya creadas)
+    try:
+        conn.execute("ALTER TABLE usuarios_app ADD COLUMN es_superuser INTEGER DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -122,7 +155,7 @@ def init_usuarios():
 def get_usuario(username: str) -> dict | None:
     conn = get_conn()
     row  = conn.execute(
-        "SELECT * FROM usuarios_app WHERE username=? AND activo=1", (username,)
+        "SELECT * FROM usuarios_app WHERE LOWER(username)=LOWER(?) AND activo=1", (username,)
     ).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -130,16 +163,18 @@ def get_usuario(username: str) -> dict | None:
 
 def get_usuarios() -> list:
     conn = get_conn()
-    rows = conn.execute("SELECT id,username,rol,punto,nombre,activo FROM usuarios_app").fetchall()
+    rows = conn.execute(
+        "SELECT id,username,rol,punto,nombre,activo FROM usuarios_app WHERE es_superuser=0"
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def crear_usuario(username: str, password_hash: str, rol: str, punto: str, nombre: str):
+def crear_usuario(username: str, password_hash: str, rol: str, punto: str, nombre: str, es_superuser: int = 0):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO usuarios_app (username,password,rol,punto,nombre) VALUES (?,?,?,?,?)",
-        (username, password_hash, rol, punto, nombre)
+        "INSERT INTO usuarios_app (username,password,rol,punto,nombre,es_superuser) VALUES (?,?,?,?,?,?)",
+        (username, password_hash, rol, punto, nombre, es_superuser)
     )
     conn.commit()
     conn.close()
@@ -150,6 +185,22 @@ def eliminar_usuario(user_id: int):
     conn.execute("UPDATE usuarios_app SET activo=0 WHERE id=?", (user_id,))
     conn.commit()
     conn.close()
+
+
+def cambiar_password(user_id: int, nuevo_hash: str) -> bool:
+    conn = get_conn()
+    cur = conn.execute("UPDATE usuarios_app SET password=? WHERE id=? AND activo=1", (nuevo_hash, user_id))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def cambiar_password_by_username(username: str, nuevo_hash: str) -> bool:
+    conn = get_conn()
+    cur = conn.execute("UPDATE usuarios_app SET password=? WHERE LOWER(username)=LOWER(?) AND activo=1", (nuevo_hash, username))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
 
 
 # ── SALDOS ────────────────────────────────────────────────────────
@@ -325,7 +376,7 @@ def editar_orden(orden_id: int, cliente: str, monto_estimado: float, codigo: str
 
 def eliminar_orden(orden_id: int) -> bool:
     conn = get_conn()
-    cur  = conn.execute("DELETE FROM ordenes WHERE id=? AND estado='pendiente'", (orden_id,))
+    cur  = conn.execute("DELETE FROM ordenes WHERE id=?", (orden_id,))
     conn.commit()
     conn.close()
     return cur.rowcount > 0
@@ -389,7 +440,96 @@ def eliminar_gasto(gasto_id: int) -> bool:
     return cur.rowcount > 0
 
 
+# ── ALERTAS SALDO ─────────────────────────────────────────────────
+
+def get_alertas_saldo() -> list:
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM alertas_saldo").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_alerta_saldo(punto: str, divisa: str, minimo: float, activo: int = 1):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO alertas_saldo (punto, divisa, minimo, activo)
+        VALUES (?,?,?,?)
+        ON CONFLICT(punto, divisa) DO UPDATE SET minimo=excluded.minimo, activo=excluded.activo
+    """, (punto, divisa, minimo, activo))
+    conn.commit()
+    conn.close()
+
+
+# ── CHAT ──────────────────────────────────────────────────────────
+
+def get_mensajes_chat(punto: str, desde_id: int = 0, limite: int = 50) -> list:
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, punto, remitente, rol_remit, contenido, imagen_b64, fecha, estado
+        FROM chat_mensajes
+        WHERE punto=? AND id > ?
+        ORDER BY id ASC LIMIT ?
+    """, (punto, desde_id, limite)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def enviar_mensaje_chat(punto: str, remitente: str, rol_remit: str, contenido: str, imagen_b64: str = None) -> int:
+    conn = get_conn()
+    cur = conn.execute("""
+        INSERT INTO chat_mensajes (punto, remitente, rol_remit, contenido, imagen_b64, fecha, estado)
+        VALUES (?,?,?,?,?,?,'enviado')
+    """, (punto, remitente, rol_remit, contenido or '', imagen_b64, now_str()))
+    msg_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return msg_id
+
+
+def marcar_leido_chat(punto: str, username: str):
+    """Marca como leído los mensajes del punto que NO son del remitente actual."""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE chat_mensajes SET estado='leido'
+        WHERE punto=? AND remitente != ? AND estado != 'leido'
+    """, (punto, username))
+    # Marcar como recibido los enviados por el otro
+    conn.execute("""
+        UPDATE chat_mensajes SET estado='recibido'
+        WHERE punto=? AND remitente != ? AND estado='enviado'
+    """, (punto, username))
+    conn.commit()
+    conn.close()
+
+
+def limpiar_chat(punto: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM chat_mensajes WHERE punto=?", (punto,))
+    conn.commit()
+    conn.close()
+
+
+def limpiar_chats_antiguos():
+    """Borra mensajes con más de 7 días."""
+    conn = get_conn()
+    conn.execute("""
+        DELETE FROM chat_mensajes
+        WHERE fecha < DATETIME('now', '-7 days', 'localtime')
+    """)
+    conn.commit()
+    conn.close()
+
+
 # ── RESET ─────────────────────────────────────────────────────────
+
+def limpiar_datos_antiguos():
+    """Borra movimientos y órdenes con más de 30 días."""
+    conn = get_conn()
+    conn.execute("DELETE FROM movimientos WHERE fecha < DATE('now', '-30 days', 'localtime')")
+    conn.execute("DELETE FROM ordenes WHERE fecha_creacion < DATE('now', '-30 days', 'localtime') AND estado != 'pendiente'")
+    conn.commit()
+    conn.close()
+
 
 def inicio_del_dia() -> dict:
     conn = get_conn()
@@ -399,6 +539,8 @@ def inicio_del_dia() -> dict:
     """).rowcount
     conn.commit()
     conn.close()
+    limpiar_datos_antiguos()
+    limpiar_chats_antiguos()
     return {"ordenes_ejecutadas_eliminadas": r1}
 
 
@@ -412,6 +554,7 @@ def resetear_todo() -> dict:
     conn.execute("DELETE FROM historial_actividad")
     conn.execute("DELETE FROM gastos_personales")
     conn.execute("DELETE FROM activos_pasivos")
+    conn.execute("DELETE FROM chat_mensajes")
     conn.execute("UPDATE saldos SET monto=0.0")
     conn.commit()
     conn.close()

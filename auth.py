@@ -46,6 +46,6 @@ def get_usuario_actual(token: str = Depends(oauth2)) -> dict:
 
 
 def solo_admin(usuario: dict = Depends(get_usuario_actual)) -> dict:
-    if usuario["rol"] != "admin":
+    if usuario["rol"] != "admin" and not usuario.get("es_superuser"):
         raise HTTPException(status_code=403, detail="Solo administradores")
     return usuario

