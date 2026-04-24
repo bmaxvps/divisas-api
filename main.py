@@ -184,10 +184,8 @@ def completar_orden(orden_id: int, data: OrdenCompletar, usuario: dict = Depends
     ok = db.completar_orden(orden_id, data.monto_real, usuario["nombre"], usuario["id"])
     if not ok:
         raise HTTPException(404, "Orden ya ejecutada")
-    # Actualizar saldo e registrar movimiento igual que el bot de Telegram
-    tipo_mov = "entrada" if orden["tipo"] == "recibir" else "salida"
-    delta    = data.monto_real if tipo_mov == "entrada" else -data.monto_real
-    db.actualizar_saldo(orden["punto"], orden["divisa"], delta)
+    # registrar_movimiento actualiza el saldo internamente
+    tipo_mov = "ingreso" if orden["tipo"] == "recibir" else "egreso"
     descripcion = f"Orden #{orden_id} — {orden['cliente']}"
     db.registrar_movimiento(
         punto=orden["punto"], divisa=orden["divisa"], tipo=tipo_mov,
