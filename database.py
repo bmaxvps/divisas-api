@@ -308,7 +308,7 @@ def eliminar_movimiento(mov_id: int) -> bool:
 
 # ── ORDENES ───────────────────────────────────────────────────────
 
-def get_ordenes(punto=None, estado=None, fecha=None) -> list:
+def get_ordenes(punto=None, estado=None, fecha=None, desde=None, hasta=None, limite=500) -> list:
     conn   = get_conn()
     query  = "SELECT * FROM ordenes WHERE 1=1"
     params = []
@@ -321,7 +321,13 @@ def get_ordenes(punto=None, estado=None, fecha=None) -> list:
     if fecha:
         query += " AND DATE(fecha_creacion)=?"
         params.append(fecha)
-    query += " ORDER BY fecha_creacion ASC"
+    if desde:
+        query += " AND (DATE(fecha_creacion)>=? OR DATE(fecha_completado)>=?)"
+        params += [desde, desde]
+    if hasta:
+        query += " AND (DATE(fecha_creacion)<=? OR DATE(fecha_completado)<=?)"
+        params += [hasta, hasta]
+    query += f" ORDER BY fecha_creacion ASC LIMIT {int(limite)}"
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -369,6 +375,17 @@ def editar_orden(orden_id: int, cliente: str, monto_estimado: float, codigo: str
             UPDATE ordenes SET cliente=?,monto_estimado=?,codigo=?
             WHERE id=? AND estado='pendiente'
         """, (cliente, monto_estimado, codigo, orden_id))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def editar_orden_ejecutada(orden_id: int, cliente: str, monto_real: float) -> bool:
+    conn = get_conn()
+    cur  = conn.execute("""
+        UPDATE ordenes SET cliente=?, monto_real=?
+        WHERE id=? AND estado='completada'
+    """, (cliente, monto_real, orden_id))
     conn.commit()
     conn.close()
     return cur.rowcount > 0

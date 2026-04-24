@@ -200,15 +200,22 @@ class OrdenEditar(BaseModel):
     codigo:         Optional[str] = ""
     divisa:         Optional[str] = None
 
+class OrdenEditarEjecutada(BaseModel):
+    cliente:    str
+    monto_real: float
+
 
 @app.get("/ordenes")
 def listar_ordenes(
     estado:  Optional[str] = None,
     fecha:   Optional[str] = None,
+    desde:   Optional[str] = None,
+    hasta:   Optional[str] = None,
+    limite:  int = 500,
     usuario: dict = Depends(auth.get_usuario_actual)
 ):
     punto = None if usuario["rol"] == "admin" else usuario["punto"]
-    return db.get_ordenes(punto=punto, estado=estado, fecha=fecha)
+    return db.get_ordenes(punto=punto, estado=estado, fecha=fecha, desde=desde, hasta=hasta, limite=limite)
 
 
 @app.post("/ordenes")
@@ -244,11 +251,35 @@ def editar_orden(orden_id: int, data: OrdenEditar, usuario: dict = Depends(auth.
     return {"ok": True}
 
 
+@app.put("/ordenes/{orden_id}/editar-ejecutada")
+def editar_orden_ejecutada(orden_id: int, data: OrdenEditarEjecutada, usuario: dict = Depends(auth.solo_admin)):
+    orden = db.get_orden_by_id(orden_id)
+    if not orden or orden["estado"] != "completada":
+        raise HTTPException(404, "Orden no encontrada o no ejecutada")
+    monto_viejo = float(orden["monto_real"] or 0)
+    monto_nuevo = data.monto_real
+    delta_ajuste = monto_nuevo - monto_viejo
+    # Actualizar la orden
+    db.editar_orden_ejecutada(orden_id, data.cliente, monto_nuevo)
+    # Ajustar saldo por la diferencia
+    if delta_ajuste != 0:
+        tipo_mov = "ingreso" if orden["tipo"] == "recibir" else "egreso"
+        saldo_delta = delta_ajuste if tipo_mov == "ingreso" else -delta_ajuste
+        db.actualizar_saldo(orden["punto"], orden["divisa"], saldo_delta)
+    return {"ok": True}
+
+
 @app.delete("/ordenes/{orden_id}")
 def eliminar_orden(orden_id: int, usuario: dict = Depends(auth.solo_admin)):
-    ok = db.eliminar_orden(orden_id)
-    if not ok:
+    orden = db.get_orden_by_id(orden_id)
+    if not orden:
         raise HTTPException(404, "Orden no encontrada")
+    # Si era completada, revertir el saldo
+    if orden["estado"] == "completada" and orden.get("monto_real"):
+        tipo_mov = "ingreso" if orden["tipo"] == "recibir" else "egreso"
+        saldo_delta = -float(orden["monto_real"]) if tipo_mov == "ingreso" else float(orden["monto_real"])
+        db.actualizar_saldo(orden["punto"], orden["divisa"], saldo_delta)
+    db.eliminar_orden(orden_id)
     return {"ok": True}
 
 
