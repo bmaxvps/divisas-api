@@ -3,9 +3,9 @@
 import os
 
 # ── Base de datos ─────────────────────────────────────
-DB_PATH = os.environ.get(
-    "DB_PATH",
-    os.path.join(os.path.dirname(__file__), "data", "divisas.db")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres:LlfvBchtNO3hMr16@db.ztkacxgfioclbkuebdzz.supabase.co:5432/postgres"
 )
 
 # ── JWT ───────────────────────────────────────────────
