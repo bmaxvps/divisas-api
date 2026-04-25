@@ -380,12 +380,12 @@ def editar_orden(orden_id: int, cliente: str, monto_estimado: float, codigo: str
     return cur.rowcount > 0
 
 
-def editar_orden_ejecutada(orden_id: int, cliente: str, monto_real: float) -> bool:
+def editar_orden_ejecutada(orden_id: int, cliente: str, monto_real: float, tipo: str) -> bool:
     conn = get_conn()
     cur  = conn.execute("""
-        UPDATE ordenes SET cliente=?, monto_real=?
+        UPDATE ordenes SET cliente=?, monto_real=?, tipo=?
         WHERE id=? AND estado='completada'
-    """, (cliente, monto_real, orden_id))
+    """, (cliente, monto_real, tipo, orden_id))
     conn.commit()
     conn.close()
     return cur.rowcount > 0

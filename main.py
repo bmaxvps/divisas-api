@@ -203,6 +203,7 @@ class OrdenEditar(BaseModel):
 class OrdenEditarEjecutada(BaseModel):
     cliente:    str
     monto_real: float
+    tipo:       Optional[str] = None  # "recibir" o "entregar"; None = mantener el actual
 
 
 @app.get("/ordenes")
@@ -257,15 +258,19 @@ def editar_orden_ejecutada(orden_id: int, data: OrdenEditarEjecutada, usuario: d
     if not orden or orden["estado"] != "completada":
         raise HTTPException(404, "Orden no encontrada o no ejecutada")
     monto_viejo = float(orden["monto_real"] or 0)
+    tipo_viejo  = orden["tipo"]
+    tipo_nuevo  = data.tipo if data.tipo else tipo_viejo
     monto_nuevo = data.monto_real
-    delta_ajuste = monto_nuevo - monto_viejo
+    # Impacto anterior en saldo
+    old_impact = monto_viejo if tipo_viejo == "recibir" else -monto_viejo
+    # Impacto nuevo en saldo
+    new_impact = monto_nuevo if tipo_nuevo == "recibir" else -monto_nuevo
+    delta = new_impact - old_impact
     # Actualizar la orden
-    db.editar_orden_ejecutada(orden_id, data.cliente, monto_nuevo)
-    # Ajustar saldo por la diferencia
-    if delta_ajuste != 0:
-        tipo_mov = "ingreso" if orden["tipo"] == "recibir" else "egreso"
-        saldo_delta = delta_ajuste if tipo_mov == "ingreso" else -delta_ajuste
-        db.actualizar_saldo(orden["punto"], orden["divisa"], saldo_delta)
+    db.editar_orden_ejecutada(orden_id, data.cliente, monto_nuevo, tipo_nuevo)
+    # Ajustar saldo solo si hay diferencia
+    if delta != 0:
+        db.actualizar_saldo(orden["punto"], orden["divisa"], delta)
     return {"ok": True}
 
 
